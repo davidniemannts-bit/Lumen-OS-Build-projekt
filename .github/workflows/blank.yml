@@ -1,36 +1,45 @@
-# This is a basic workflow to help you get started with Actions
-
-name: CI
-
-# Controls when the workflow will run
-on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+name: Build ISO
+on: workflow_dispatch
 jobs:
-  # This workflow contains a single job called "build"
   build:
-    # The type of runner that the job will run on
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    container:
+      image: debian:bookworm
+      options: --privileged
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
-
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Werkzeug installieren
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          apt-get update
+          apt-get install -y live-build
+      - name: ISO konfigurieren
+        run: |
+          mkdir -p /build && cd /build
+          lb config --distribution bookworm --architectures amd64 \
+            --binary-images iso-hybrid --debian-installer live \
+            --archive-areas "main non-free-firmware" --iso-volume LumenOS \
+            --bootappend-live "boot=live components quiet noautologin"
+          mkdir -p config/package-lists config/hooks/normal config/includes.chroot/etc/skel \
+            config/includes.chroot/etc/systemd/system/getty@tty1.service.d
+          printf 'cage\nchromium\nnetwork-manager\nsudo\nfirmware-linux\nfirmware-iwlwifi\nfirmware-realtek\n' > config/package-lists/lumen.list.chroot
+          cat > config/hooks/normal/0100-user.hook.chroot <<'EOF'
+          #!/bin/sh
+          useradd -m -s /bin/bash -G audio,video,netdev,sudo lumen
+          echo "lumen:lumen" | chpasswd
+          EOF
+          chmod +x config/hooks/normal/0100-user.hook.chroot
+          cat > config/includes.chroot/etc/systemd/system/getty@tty1.service.d/autologin.conf <<'EOF'
+          [Service]
+          ExecStart=
+          ExecStart=-/sbin/agetty --autologin lumen --noclear %I $TERM
+          EOF
+          cat > config/includes.chroot/etc/skel/.bash_profile <<'EOF'
+          if [ -z "$WAYLAND_DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+            exec cage -- chromium --kiosk --no-first-run --noerrdialogs https://lumen-os-pro.base44.app
+          fi
+          EOF
+      - name: ISO bauen
+        run: cd /build && lb build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumen-iso
+          path: /build/*.iso
